@@ -10,58 +10,92 @@ if (!SLACK_WEBHOOK) {
   process.exit(1);
 }
 
-// format exactly: "#  Name                      Pts   W   L"
+// helper to pad names
+function pad(str, width) {
+  str = String(str ?? "");
+  return str.length >= width ? str.slice(0, width - 1) + "…" : str.padEnd(width, " ");
+}
+
+// ===== Simple formatter: "#  Name  Pts  W  L" =====
 function makeBlock(rows) {
-  const hdr = rows[0].map(s => String(s || "").trim().toLowerCase());
+  const header = rows[0].map(s => String(s || "").trim().toLowerCase());
+  const body = rows.slice(1);
 
-  // lock columns to these titles, but be tolerant of spacing
-  const idx = {
-    rank:  hdr.findIndex(h => h === "#" || h === "rank" || h === "pos" || h === "position"),
-    name:  hdr.findIndex(h => h === "name" || h === "player" || h === "team"),
-    pts:   hdr.findIndex(h => h === "pts" || h === "points"),
-    w:     hdr.findIndex(h => h === "w" || h === "wins"),
-    l:     hdr.findIndex(h => h === "l" || h === "losses"),
-  };
+  // pick NAME as the most text-heavy column, never a fully numeric column
+  const colCount = header.length;
+  let idxName = -1;
+  let bestScore = -1;
+  for (let c = 0; c < colCount; c++) {
+    const values = body.map(r => String(r[c] ?? "").trim());
+    const numericRatio = values.filter(v => /^\d+$/.test(v)).length / Math.max(values.length, 1);
+    const textLen = values.reduce((acc, v) => acc + (/\D/.test(v) ? v.length : 0), 0);
+    const score = (1 - numericRatio) * 1000 + textLen; // favor non numeric, then long text
+    if (score > bestScore) { bestScore = score; idxName = c; }
+  }
 
-  // if any are missing, fall back to reasonable guesses by label
-  const colCount = hdr.length;
-  const need = k => idx[k] < 0;
-  if (need("name"))  idx.name = Math.max(0, hdr.findIndex(h => /name|player|team/.test(h)));
-  if (need("pts"))   idx.pts  = hdr.findIndex(h => /(pts|points|score)/.test(h));
-  if (need("w"))     idx.w    = hdr.findIndex(h => /(^|[^a-z])w(in|ins)?$/.test(h));
-  if (need("l"))     idx.l    = hdr.findIndex(h => /(^|[^a-z])l(oss|osses)?$/.test(h));
-  if (need("rank"))  idx.rank = hdr.findIndex(h => /(rank|pos|position|#)/.test(h));
+  // detect RANK if exists
+  let idxRank = header.findIndex(h => h === "#" || h === "rank" || h === "pos" || h === "position");
+  if (idxRank < 0) {
+    // try any small integer sequential column not equal to name
+    let bestSeq = -1, bestSeqIdx = -1;
+    for (let c = 0; c < colCount; c++) {
+      if (c === idxName) continue;
+      const nums = body.map(r => parseInt(String(r[c] ?? "").trim(), 10)).filter(n => Number.isFinite(n));
+      if (nums.length < Math.min(5, body.length)) continue;
+      // measure how sequential it is
+      let ok = 0;
+      for (let i = 1; i < nums.length; i++) if (nums[i] === nums[i - 1] + 1) ok++;
+      const ratio = ok / Math.max(nums.length - 1, 1);
+      if (ratio > bestSeq) { bestSeq = ratio; bestSeqIdx = c; }
+    }
+    if (bestSeq > 0.6) idxRank = bestSeqIdx;
+  }
 
-  // render
-  const body = rows.slice(1, 1 + Math.min(MAX_ROWS, rows.length - 1));
+  // detect PTS, W, L by header name only, do not guess
+  const idxPts = header.findIndex(h => h === "pts" || h === "points" || h === "score");
+  const idxW   = header.findIndex(h => h === "w" || h === "wins");
+  const idxL   = header.findIndex(h => h === "l" || h === "losses");
+
+  // keep order by rank if we have it
+  const rowsSorted = [...body];
+  if (idxRank >= 0) {
+    rowsSorted.sort((a, b) => {
+      const ra = parseInt(String(a[idxRank] ?? "").trim(), 10);
+      const rb = parseInt(String(b[idxRank] ?? "").trim(), 10);
+      if (Number.isFinite(ra) && Number.isFinite(rb)) return ra - rb;
+      return 0;
+    });
+  }
+
   const lines = [];
   lines.push("```#  Name                      Pts   W   L");
-  for (const r of body) {
-    const rank = idx.rank >= 0 && r[idx.rank] != null ? String(r[idx.rank]).trim() : "";
-    const name = idx.name >= 0 && r[idx.name] != null ? String(r[idx.name]) : "";
-    const pts  = idx.pts  >= 0 && r[idx.pts]  != null ? String(r[idx.pts]).trim()  : "";
-    const w    = idx.w    >= 0 && r[idx.w]    != null ? String(r[idx.w]).trim()    : "";
-    const l    = idx.l    >= 0 && r[idx.l]    != null ? String(r[idx.l]).trim()    : "";
-    lines.push(`${rank.toString().padStart(2," ")}  ${name.padEnd(24)}  ${pts.padStart(3," ")}  ${w.padStart(2," ")}  ${l.padStart(2," ")}`);
+  const max = Math.min(rowsSorted.length, MAX_ROWS);
+  for (let i = 0; i < max; i++) {
+    const r = rowsSorted[i];
+    const rank = idxRank >= 0 ? String(r[idxRank] ?? "").trim() : String(i + 1);
+    const name = pad(r[idxName] ?? "", 24);
+    const pts  = idxPts >= 0 ? String(r[idxPts] ?? "").trim() : "";
+    const w    = idxW   >= 0 ? String(r[idxW]   ?? "").trim() : "";
+    const l    = idxL   >= 0 ? String(r[idxL]   ?? "").trim() : "";
+    lines.push(`${rank.padStart(2, " ")}  ${name}  ${pts.padStart(3, " ")}  ${w.padStart(2, " ")}  ${l.padStart(2, " ")}`);
   }
   lines.push("```");
   return lines.join("\n");
 }
 
-// find the best-looking standings table in this frame or its children
+// ===== Find the standings table in this frame or children =====
 async function extractRowsFromFrame(frame) {
   const rows = await frame.evaluate(() => {
-    function tableToRows(table) {
+    function tableToRows(t) {
       const out = [];
-      for (const tr of table.querySelectorAll("tr")) {
+      for (const tr of t.querySelectorAll("tr")) {
         const cells = Array.from(tr.querySelectorAll("th,td")).map(td => td.innerText.trim());
         if (cells.length) out.push(cells);
       }
       return out;
     }
-
     const tables = Array.from(document.querySelectorAll("table"));
-    let best = null, scoreBest = -1;
+    let best = null, bestScore = -1;
     for (const t of tables) {
       const txt = t.innerText.toLowerCase();
       let s = 0;
@@ -70,24 +104,22 @@ async function extractRowsFromFrame(frame) {
       if (txt.includes("wins") || /\bw\b/.test(txt)) s += 1;
       if (txt.includes("losses") || /\bl\b/.test(txt)) s += 1;
       if (txt.includes("rank") || txt.includes("#")) s += 1;
-      if (s > scoreBest) { best = t; scoreBest = s; }
+      if (s > bestScore) { best = t; bestScore = s; }
     }
-
     if (!best) return [];
-
     const rows = tableToRows(best);
     if (!rows.length) return [];
 
-    // if the first row is not a header, synthesize a simple header
+    // synthesize a header if first row is not a header
     const headerLooksReal = rows[0].some(c => /#|rank|name|player|team|pts|points|w|wins|l|loss/i.test(c));
     if (!headerLooksReal) {
-      const width = rows[0].length;
-      const fake = Array(width).fill("");
-      if (width >= 1) fake[0] = "#";
-      if (width >= 2) fake[1] = "Name";
-      if (width >= 3) fake[2] = "Pts";
-      if (width >= 4) fake[3] = "W";
-      if (width >= 5) fake[4] = "L";
+      const w = rows[0].length;
+      const fake = Array(w).fill("");
+      if (w >= 1) fake[0] = "#";
+      if (w >= 2) fake[1] = "Name";
+      if (w >= 3) fake[2] = "Pts";
+      if (w >= 4) fake[3] = "W";
+      if (w >= 5) fake[4] = "L";
       rows.unshift(fake);
     }
     return rows;
@@ -107,22 +139,18 @@ async function run() {
     args: ["--no-sandbox", "--disable-setuid-sandbox"]
   });
   const page = await browser.newPage();
-
   await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit(537.36) Chrome/124 Safari/537.36");
   await page.setViewport({ width: 1280, height: 900, deviceScaleFactor: 2 });
   await page.goto(CHALLONGE_URL, { waitUntil: "networkidle2", timeout: 60000 });
 
   await new Promise(r => setTimeout(r, 4000));
-
   let rows = await extractRowsFromFrame(page.mainFrame());
   if (!rows.length) {
     await new Promise(r => setTimeout(r, 4000));
     rows = await extractRowsFromFrame(page.mainFrame());
   }
-
   await browser.close();
 
-  // always send something so it never looks like a no-op
   if (!rows || rows.length < 2) {
     const payload = { text: `Challonge leaderboard\n${CHALLONGE_URL}\nNo table found.` };
     const res = await fetch(SLACK_WEBHOOK, {
