@@ -3,8 +3,7 @@ import puppeteer from "puppeteer";
 
 const CHALLONGE_URL = process.env.CHALLONGE_URL || "https://challonge.com/LEAGUEVG/module";
 const SLACK_WEBHOOK = process.env.SLACK_WEBHOOK_URL;
-// show everyone
-const MAX_ROWS = parseInt(process.env.MAX_ROWS || "9999", 10);
+const MAX_ROWS = parseInt(process.env.MAX_ROWS || "9999", 10); // include everyone
 
 if (!SLACK_WEBHOOK) {
   console.error("SLACK_WEBHOOK_URL is missing");
@@ -16,12 +15,12 @@ function pad(str, width) {
   return str.length >= width ? str.slice(0, width - 1) + "…" : str.padEnd(width, " ");
 }
 
-/* ===================== table formatting: Name + W L T ===================== */
-function makeBlock(rows) {
-  const header = rows[0].map(s => String(s || "").trim().toLowerCase());
-  const body = rows.slice(1);
+/* ===================== format: Name + W L T ===================== */
+function makeBlock(allRows) {
+  const header = allRows[0].map(s => String(s || "").trim().toLowerCase());
+  const body = allRows.slice(1);
 
-  // choose Name column as most text heavy
+  // choose Name column as the most text-heavy
   let idxName = header.findIndex(h => /^(name|player|team)$/.test(h));
   if (idxName < 0) {
     let best = -1, bestLen = -1;
@@ -35,12 +34,12 @@ function makeBlock(rows) {
     idxName = best >= 0 ? best : 0;
   }
 
-  // detect explicit W L T columns
+  // explicit W L T columns if exist
   let idxW = header.findIndex(h => /^(w|wins)$/.test(h));
   let idxL = header.findIndex(h => /^(l|loss|losses)$/.test(h));
   let idxT = header.findIndex(h => /^(t|tie|ties|draw|draws)$/.test(h));
 
-  // detect combined "4 - 1 - 0"
+  // combined "4 - 1 - 0"
   let idxRecord = -1;
   if (idxW < 0 || idxL < 0) {
     const looksLikeWLT = v => /^\s*\d+\s*-\s*\d+\s*-\s*\d+\s*$/.test(String(v || ""));
@@ -73,9 +72,9 @@ function makeBlock(rows) {
   lines.push("```");
   return lines.join("\n");
 }
-/* ======================================================================== */
+/* =============================================================== */
 
-/* find the standings table in a frame, return rows and a way to click next */
+/* Evaluate current frame, return rows and a safe CSS path to a Next button if present */
 async function scrapeCurrentPage(frame) {
   return await frame.evaluate(() => {
     function tableToRows(t) {
@@ -87,25 +86,27 @@ async function scrapeCurrentPage(frame) {
       return out;
     }
 
+    // choose best table by keywords
     const tables = Array.from(document.querySelectorAll("table"));
     let best = null, score = -1;
     for (const t of tables) {
       const txt = t.innerText.toLowerCase();
       let s = 0;
       if (txt.includes("name") || txt.includes("player") || txt.includes("team")) s += 2;
-      if (txt.includes("w") || txt.includes("wins")) s += 1;
-      if (txt.includes("l") || txt.includes("loss")) s += 1;
-      if (txt.includes("tie") || txt.includes("draw") || txt.includes(" t ")) s += 1;
-      if (txt.includes("-") && /\d+\s*-\s*\d+/.test(txt)) s += 1;
+      if (/\bw\b|wins?/.test(txt)) s += 1;
+      if (/\bl\b|loss/.test(txt)) s += 1;
+      if (/(tie|draw|\bt\b)/.test(txt)) s += 1;
+      if (/\d+\s*-\s*\d+/.test(txt)) s += 1;
       if (s > score) { score = s; best = t; }
     }
-    if (!best) return { rows: [], hasNext: false, nextSelector: null };
+    if (!best) return { rows: [], nextPath: null };
 
     const rows = tableToRows(best);
-    if (!rows.length) return { rows: [], hasNext: false, nextSelector: null };
+    if (!rows.length) return { rows: [], nextPath: null };
 
-    const headerLooksReal = rows[0].some(c => /name|player|team|w|wins|l|loss|t|tie|draw/i.test(c));
-    if (!headerLooksReal) {
+    // synthesize header if missing
+    const headOK = rows[0].some(c => /name|player|team|w|wins|l|loss|t|tie|draw/i.test(c));
+    if (!headOK) {
       const w = rows[0].length;
       const fake = Array(w).fill("");
       if (w >= 1) fake[0] = "Name";
@@ -115,63 +116,70 @@ async function scrapeCurrentPage(frame) {
       rows.unshift(fake);
     }
 
-    // try to find a next button in common Challonge pagers
-    let nextSel = null;
-    const candidates = [
-      "a[rel='next']",
-      "li.next a",
-      ".pagination a.next",
-      ".pager a.next",
-      "a:contains('Next')"
-    ];
-    for (const sel of candidates) {
-      const el = document.querySelector(sel);
-      if (el && !el.classList.contains("disabled") && !el.closest("li")?.classList.contains("disabled")) {
-        nextSel = sel;
-        break;
+    // find a clickable "Next" without using invalid selectors
+    function cssPath(el) {
+      const segs = [];
+      for (; el && el.nodeType === 1 && el !== document.body; el = el.parentElement) {
+        let s = el.tagName.toLowerCase();
+        if (el.id) { s += `#${el.id}`; segs.unshift(s); break; }
+        if (el.className && typeof el.className === "string") {
+          const cls = el.className.trim().split(/\s+/).filter(Boolean);
+          if (cls.length) s += "." + cls.join(".");
+        }
+        const parent = el.parentElement;
+        if (parent) {
+          const same = Array.from(parent.children).filter(x => x.tagName === el.tagName);
+          if (same.length > 1) s += `:nth-of-type(${same.indexOf(el) + 1})`;
+        }
+        segs.unshift(s);
       }
+      return segs.length ? segs.join(" > ") : null;
     }
-    const hasNext = !!nextSel;
-    return { rows, hasNext, nextSelector: nextSel };
+
+    const candidates = Array.from(document.querySelectorAll("a,button"))
+      .filter(el => {
+        const t = (el.textContent || "").trim().toLowerCase();
+        return t === "next" || t.includes("next") || t === "›" || t === ">" || t === "»";
+      })
+      .filter(el => !el.closest(".disabled,[aria-disabled='true'],.is-disabled"));
+
+    const nextEl = candidates[0] || null;
+    const nextPath = nextEl ? cssPath(nextEl) : null;
+
+    return { rows, nextPath };
   });
 }
 
-/* walk frames to find the one that contains the standings table */
+/* Find the frame containing Challonge content */
 function findTargetFrame(page) {
   const frames = page.frames();
-  return frames.find(f => f.url().includes("challonge") || f.url().includes("module")) || page.mainFrame();
+  return frames.find(f => f.url().includes("challonge")) || page.mainFrame();
 }
 
-/* collect all pages by clicking next until it disappears */
+/* Aggregate all pages by clicking Next until it disappears */
 async function collectAllRows(page) {
   const target = findTargetFrame(page);
   let allRows = [];
   let headerAdded = false;
 
   for (let i = 0; i < 20; i++) { // hard cap to avoid infinite loop
-    const { rows, hasNext, nextSelector } = await scrapeCurrentPage(target);
+    const { rows, nextPath } = await scrapeCurrentPage(target);
     if (!rows.length) break;
 
-    if (!headerAdded) {
-      allRows.push(rows[0]); // header
-      headerAdded = true;
-    }
+    if (!headerAdded) { allRows.push(rows[0]); headerAdded = true; }
     for (const r of rows.slice(1)) allRows.push(r);
 
-    if (!hasNext) break;
+    if (!nextPath) break;
 
-    // try clicking next inside the frame
-    const clicked = await target.evaluate(selector => {
-      const el = document.querySelector(selector);
+    const clicked = await target.evaluate((sel) => {
+      const el = document.querySelector(sel);
       if (!el) return false;
-      el.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
+      el.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
       return true;
-    }, nextSelector);
+    }, nextPath);
 
     if (!clicked) break;
-
-    // wait a bit for content to change
-    await new Promise(r => setTimeout(r, 1200));
+    await new Promise(r => setTimeout(r, 1200)); // wait for next page to render
   }
 
   return allRows;
@@ -182,6 +190,7 @@ async function run() {
     args: ["--no-sandbox", "--disable-setuid-sandbox"]
   });
   const page = await browser.newPage();
+
   await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit(537.36) Chrome/124 Safari/537.36");
   await page.setViewport({ width: 1280, height: 900, deviceScaleFactor: 2 });
   await page.goto(CHALLONGE_URL, { waitUntil: "networkidle2", timeout: 60000 });
