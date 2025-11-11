@@ -2,7 +2,7 @@ name: Challonge leaderboard to Slack (text)
 
 on:
   schedule:
-    - cron: "0 9 * * *"   # runs daily at 09:00 UTC
+    - cron: "0 9 * * *"   # runs daily at 14:00 UTC
   workflow_dispatch:       # lets you run manually too
 
 jobs:
