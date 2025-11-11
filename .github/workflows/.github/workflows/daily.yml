@@ -2,19 +2,25 @@ name: Challonge leaderboard to Slack (text)
 
 on:
   schedule:
-    - cron: "0 9 * * *"
-  workflow_dispatch:
+    - cron: "0 9 * * *"   # runs daily at 09:00 UTC
+  workflow_dispatch:       # lets you run manually too
 
 jobs:
   post:
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
-      - run: npm ci
-      - env:
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Run script
+        env:
           CHALLONGE_URL: ${{ secrets.CHALLONGE_URL }}
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           MAX_ROWS: "12"
