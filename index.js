@@ -3,7 +3,8 @@ import puppeteer from "puppeteer";
 
 const CHALLONGE_URL = process.env.CHALLONGE_URL || "https://challonge.com/LEAGUEVG/module";
 const SLACK_WEBHOOK = process.env.SLACK_WEBHOOK_URL;
-const MAX_ROWS = parseInt(process.env.MAX_ROWS || "20", 10);
+// show everyone by default
+const MAX_ROWS = parseInt(process.env.MAX_ROWS || "9999", 10);
 
 if (!SLACK_WEBHOOK) {
   console.error("SLACK_WEBHOOK_URL is missing");
@@ -15,7 +16,7 @@ function pad(str, width) {
   return str.length >= width ? str.slice(0, width - 1) + "…" : str.padEnd(width, " ");
 }
 
-/* =============== FORMATTER: Name + W L T only =============== */
+/* =============== FORMATTER: Name + W L T only, keep source order =============== */
 function makeBlock(rows) {
   const header = rows[0].map(s => String(s || "").trim().toLowerCase());
   const body = rows.slice(1);
@@ -34,12 +35,12 @@ function makeBlock(rows) {
     idxName = best >= 0 ? best : 0;
   }
 
-  // find explicit W L T columns
+  // explicit W L T columns if they exist
   let idxW = header.findIndex(h => /^(w|wins)$/.test(h));
   let idxL = header.findIndex(h => /^(l|loss|losses)$/.test(h));
   let idxT = header.findIndex(h => /^(t|tie|ties|draw|draws)$/.test(h));
 
-  // if not found, detect a combined record column like "4 - 1 - 0"
+  // combined record like "4 - 1 - 0"
   let idxRecord = -1;
   if (idxW < 0 || idxL < 0) {
     const looksLikeWLT = v => /^\s*\d+\s*-\s*\d+\s*-\s*\d+\s*$/.test(String(v || ""));
@@ -50,8 +51,12 @@ function makeBlock(rows) {
     }
   }
 
-  // parse rows
-  const parsed = body.slice(0, MAX_ROWS).map(r => {
+  // do not sort, keep Challonge order
+  const limited = body.slice(0, MAX_ROWS);
+
+  const lines = [];
+  lines.push("```Name                      W   L   T");
+  for (const r of limited) {
     const name = String(r[idxName] ?? "").trim();
     let w = 0, l = 0, t = 0;
 
@@ -64,21 +69,12 @@ function makeBlock(rows) {
       if (idxT >= 0) t = parseInt(String(r[idxT] ?? "0").trim(), 10) || 0;
     }
 
-    return { name, w, l, t };
-  });
-
-  // optional sort by wins then losses then name
-  parsed.sort((a, b) => b.w - a.w || a.l - b.l || a.name.localeCompare(b.name));
-
-  const lines = [];
-  lines.push("```Name                      W   L   T");
-  for (const row of parsed) {
-    lines.push(`${pad(row.name, 24)}  ${String(row.w).padStart(2," ")}  ${String(row.l).padStart(2," ")}  ${String(row.t).padStart(2," ")}`);
+    lines.push(`${pad(name, 24)}  ${String(w).padStart(2," ")}  ${String(l).padStart(2," ")}  ${String(t).padStart(2," ")}`);
   }
   lines.push("```");
   return lines.join("\n");
 }
-/* ============================================================ */
+/* ============================================================================ */
 
 // read best looking standings table in this frame or children
 async function extractRowsFromFrame(frame) {
@@ -99,8 +95,8 @@ async function extractRowsFromFrame(frame) {
       if (txt.includes("name") || txt.includes("player") || txt.includes("team")) s += 2;
       if (txt.includes("w") || txt.includes("wins")) s += 1;
       if (txt.includes("l") || txt.includes("loss")) s += 1;
-      if (txt.includes("tie") || txt.includes("draw") || txt.includes("t ")) s += 1;
-      if (txt.includes("-") && /\d+\s*-\s*\d+/.test(txt)) s += 1; // combined record hint
+      if (txt.includes("tie") || txt.includes("draw") || txt.includes(" t ")) s += 1;
+      if (txt.includes("-") && /\d+\s*-\s*\d+/.test(txt)) s += 1;
       if (s > score) { score = s; best = t; }
     }
     if (!best) return [];
