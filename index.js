@@ -18,11 +18,24 @@ function pad(str, width) {
 function makeBlock(rows) {
   const header = rows[0].map(s => s.toLowerCase());
   const idx = {
-    rank: header.findIndex(h => /rank|pos|#/.test(h)),
     name: header.findIndex(h => /name|player|team/.test(h)),
     wins: header.findIndex(h => /win|w\b/.test(h)),
-    losses: header.findIndex(h => /loss|l\b/.test(h)),
-    points: header.findIndex(h => /point|pts|score/.test(h))
+    losses: header.findIndex(h => /loss|l\b/.test(h))
+  };
+
+  const body = rows.slice(1, MAX_ROWS + 1);
+  const lines = [];
+  lines.push("```Name                      W   L");
+  for (const r of body) {
+    const name = idx.name >= 0 ? r[idx.name] : r[1] || "";
+    const w = idx.wins >= 0 ? r[idx.wins] : "";
+    const l = idx.losses >= 0 ? r[idx.losses] : "";
+    lines.push(`${name.padEnd(24)}  ${String(w || "").padStart(2," ")}  ${String(l || "").padStart(2," ")}`);
+  }
+  lines.push("```");
+  return lines.join("\n");
+}
+
   };
 
   const body = rows.slice(1, MAX_ROWS + 1);
