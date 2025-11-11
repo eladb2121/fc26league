@@ -3,7 +3,7 @@ import puppeteer from "puppeteer";
 
 const CHALLONGE_URL = process.env.CHALLONGE_URL || "https://challonge.com/LEAGUEVG/module";
 const SLACK_WEBHOOK = process.env.SLACK_WEBHOOK_URL;
-// show everyone by default
+// show everyone
 const MAX_ROWS = parseInt(process.env.MAX_ROWS || "9999", 10);
 
 if (!SLACK_WEBHOOK) {
@@ -16,12 +16,12 @@ function pad(str, width) {
   return str.length >= width ? str.slice(0, width - 1) + "…" : str.padEnd(width, " ");
 }
 
-/* =============== FORMATTER: Name + W L T only, keep source order =============== */
+/* ===================== table formatting: Name + W L T ===================== */
 function makeBlock(rows) {
   const header = rows[0].map(s => String(s || "").trim().toLowerCase());
   const body = rows.slice(1);
 
-  // choose Name column as the most text heavy column
+  // choose Name column as most text heavy
   let idxName = header.findIndex(h => /^(name|player|team)$/.test(h));
   if (idxName < 0) {
     let best = -1, bestLen = -1;
@@ -35,12 +35,12 @@ function makeBlock(rows) {
     idxName = best >= 0 ? best : 0;
   }
 
-  // explicit W L T columns if they exist
+  // detect explicit W L T columns
   let idxW = header.findIndex(h => /^(w|wins)$/.test(h));
   let idxL = header.findIndex(h => /^(l|loss|losses)$/.test(h));
   let idxT = header.findIndex(h => /^(t|tie|ties|draw|draws)$/.test(h));
 
-  // combined record like "4 - 1 - 0"
+  // detect combined "4 - 1 - 0"
   let idxRecord = -1;
   if (idxW < 0 || idxL < 0) {
     const looksLikeWLT = v => /^\s*\d+\s*-\s*\d+\s*-\s*\d+\s*$/.test(String(v || ""));
@@ -51,7 +51,6 @@ function makeBlock(rows) {
     }
   }
 
-  // do not sort, keep Challonge order
   const limited = body.slice(0, MAX_ROWS);
 
   const lines = [];
@@ -74,11 +73,11 @@ function makeBlock(rows) {
   lines.push("```");
   return lines.join("\n");
 }
-/* ============================================================================ */
+/* ======================================================================== */
 
-// read best looking standings table in this frame or children
-async function extractRowsFromFrame(frame) {
-  const rows = await frame.evaluate(() => {
+/* find the standings table in a frame, return rows and a way to click next */
+async function scrapeCurrentPage(frame) {
+  return await frame.evaluate(() => {
     function tableToRows(t) {
       const out = [];
       for (const tr of t.querySelectorAll("tr")) {
@@ -87,6 +86,7 @@ async function extractRowsFromFrame(frame) {
       }
       return out;
     }
+
     const tables = Array.from(document.querySelectorAll("table"));
     let best = null, score = -1;
     for (const t of tables) {
@@ -99,11 +99,13 @@ async function extractRowsFromFrame(frame) {
       if (txt.includes("-") && /\d+\s*-\s*\d+/.test(txt)) s += 1;
       if (s > score) { score = s; best = t; }
     }
-    if (!best) return [];
+    if (!best) return { rows: [], hasNext: false, nextSelector: null };
+
     const rows = tableToRows(best);
-    if (!rows.length) return [];
-    const headOK = rows[0].some(c => /name|player|team|w|wins|l|loss|t|tie|draw/i.test(c));
-    if (!headOK) {
+    if (!rows.length) return { rows: [], hasNext: false, nextSelector: null };
+
+    const headerLooksReal = rows[0].some(c => /name|player|team|w|wins|l|loss|t|tie|draw/i.test(c));
+    if (!headerLooksReal) {
       const w = rows[0].length;
       const fake = Array(w).fill("");
       if (w >= 1) fake[0] = "Name";
@@ -112,15 +114,67 @@ async function extractRowsFromFrame(frame) {
       if (w >= 4) fake[3] = "T";
       rows.unshift(fake);
     }
-    return rows;
-  });
 
-  if (rows.length) return rows;
-  for (const child of frame.childFrames()) {
-    const r = await extractRowsFromFrame(child);
-    if (r.length) return r;
+    // try to find a next button in common Challonge pagers
+    let nextSel = null;
+    const candidates = [
+      "a[rel='next']",
+      "li.next a",
+      ".pagination a.next",
+      ".pager a.next",
+      "a:contains('Next')"
+    ];
+    for (const sel of candidates) {
+      const el = document.querySelector(sel);
+      if (el && !el.classList.contains("disabled") && !el.closest("li")?.classList.contains("disabled")) {
+        nextSel = sel;
+        break;
+      }
+    }
+    const hasNext = !!nextSel;
+    return { rows, hasNext, nextSelector: nextSel };
+  });
+}
+
+/* walk frames to find the one that contains the standings table */
+function findTargetFrame(page) {
+  const frames = page.frames();
+  return frames.find(f => f.url().includes("challonge") || f.url().includes("module")) || page.mainFrame();
+}
+
+/* collect all pages by clicking next until it disappears */
+async function collectAllRows(page) {
+  const target = findTargetFrame(page);
+  let allRows = [];
+  let headerAdded = false;
+
+  for (let i = 0; i < 20; i++) { // hard cap to avoid infinite loop
+    const { rows, hasNext, nextSelector } = await scrapeCurrentPage(target);
+    if (!rows.length) break;
+
+    if (!headerAdded) {
+      allRows.push(rows[0]); // header
+      headerAdded = true;
+    }
+    for (const r of rows.slice(1)) allRows.push(r);
+
+    if (!hasNext) break;
+
+    // try clicking next inside the frame
+    const clicked = await target.evaluate(selector => {
+      const el = document.querySelector(selector);
+      if (!el) return false;
+      el.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
+      return true;
+    }, nextSelector);
+
+    if (!clicked) break;
+
+    // wait a bit for content to change
+    await new Promise(r => setTimeout(r, 1200));
   }
-  return [];
+
+  return allRows;
 }
 
 async function run() {
@@ -128,17 +182,13 @@ async function run() {
     args: ["--no-sandbox", "--disable-setuid-sandbox"]
   });
   const page = await browser.newPage();
-
   await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit(537.36) Chrome/124 Safari/537.36");
   await page.setViewport({ width: 1280, height: 900, deviceScaleFactor: 2 });
   await page.goto(CHALLONGE_URL, { waitUntil: "networkidle2", timeout: 60000 });
 
-  await new Promise(r => setTimeout(r, 4000));
-  let rows = await extractRowsFromFrame(page.mainFrame());
-  if (!rows.length) {
-    await new Promise(r => setTimeout(r, 4000));
-    rows = await extractRowsFromFrame(page.mainFrame());
-  }
+  await new Promise(r => setTimeout(r, 3000));
+
+  const rows = await collectAllRows(page);
   await browser.close();
 
   const text = rows && rows.length >= 2
