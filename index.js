@@ -1,5 +1,48 @@
+import fetch from "node-fetch";
+import puppeteer from "puppeteer";
+
+const CHALLONGE_URL = process.env.CHALLONGE_URL || "https://challonge.com/LEAGUEVG/module";
+const SLACK_WEBHOOK = process.env.SLACK_WEBHOOK_URL;
+const MAX_ROWS = parseInt(process.env.MAX_ROWS || "12", 10);
+
+if (!SLACK_WEBHOOK) {
+  console.error("SLACK_WEBHOOK_URL is missing");
+  process.exit(1);
+}
+
+function pad(str, width) {
+  str = String(str ?? "");
+  return str.length >= width ? str.slice(0, width - 1) + "…" : str.padEnd(width, " ");
+}
+
+function makeBlock(rows) {
+  const header = rows[0].map(s => s.toLowerCase());
+  const idx = {
+    rank: header.findIndex(h => /rank|pos|#/.test(h)),
+    name: header.findIndex(h => /name|player|team/.test(h)),
+    wins: header.findIndex(h => /win|w\b/.test(h)),
+    losses: header.findIndex(h => /loss|l\b/.test(h)),
+    points: header.findIndex(h => /point|pts|score/.test(h))
+  };
+
+  const body = rows.slice(1, MAX_ROWS + 1);
+  const lines = [];
+  lines.push("```#  Name                      Pts   W   L");
+  for (const r of body) {
+    const rank = idx.rank >= 0 ? r[idx.rank] : "";
+    const name = idx.name >= 0 ? r[idx.name] : r[1] || "";
+    const pts  = idx.points >= 0 ? r[idx.points] : "";
+    const w    = idx.wins >= 0 ? r[idx.wins] : "";
+    const l    = idx.losses >= 0 ? r[idx.losses] : "";
+    const rank2 = String(rank || lines.length).padStart(2, " ");
+    lines.push(`${rank2}  ${pad(name, 24)}  ${String(pts || "").padStart(3," ")}  ${String(w || "").padStart(2," ")}  ${String(l || "").padStart(2," ")}`);
+  }
+  lines.push("```");
+  return lines.join("\n");
+}
+
+// helper: searches recursively in all frames
 async function extractRowsFromFrame(frame) {
-  // get rows from any <table> in this frame
   const rows = await frame.evaluate(() => {
     function tableToRows(table) {
       const out = [];
@@ -47,10 +90,60 @@ async function extractRowsFromFrame(frame) {
 
   if (rows.length) return rows;
 
-  // try again inside nested iframes
   for (const child of frame.childFrames()) {
     const r = await extractRowsFromFrame(child);
     if (r.length) return r;
   }
   return [];
 }
+
+async function run() {
+  const browser = await puppeteer.launch({
+    args: ["--no-sandbox", "--disable-setuid-sandbox"]
+  });
+  const page = await browser.newPage();
+
+  await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36");
+  await page.setViewport({ width: 1280, height: 900, deviceScaleFactor: 2 });
+  await page.goto(CHALLONGE_URL, { waitUntil: "networkidle2", timeout: 60000 });
+
+  await new Promise(r => setTimeout(r, 4000));
+
+  let rows = await extractRowsFromFrame(page.mainFrame());
+  if (!rows.length) {
+    await new Promise(r => setTimeout(r, 4000));
+    rows = await extractRowsFromFrame(page.mainFrame());
+  }
+
+  await browser.close();
+
+  if (!rows || rows.length < 2) {
+    const fallbackText = `Challonge leaderboard\n${CHALLONGE_URL}\nNo table found.`;
+    await fetch(SLACK_WEBHOOK, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: fallbackText })
+    });
+    return;
+  }
+
+  const block = makeBlock(rows);
+  const title = "*Daily Challonge leaderboard*";
+  const payload = { text: `${title}\n${block}\n${CHALLONGE_URL}` };
+
+  const res = await fetch(SLACK_WEBHOOK, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+
+  if (!res.ok) {
+    console.error("Slack webhook failed", await res.text());
+    process.exit(1);
+  }
+}
+
+run().catch(err => {
+  console.error(err);
+  process.exit(1);
+});
