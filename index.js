@@ -93,7 +93,7 @@ async function run() {
   const page = await browser.newPage();
   await page.setViewport({ width: 1280, height: 900, deviceScaleFactor: 2 });
   await page.goto(CHALLONGE_URL, { waitUntil: "networkidle2", timeout: 60000 });
-  await page.waitForTimeout(2500);
+await new Promise(r => setTimeout(r, 2500));
   await page.waitForSelector("table", { timeout: 15000 }).catch(() => {});
   const rows = await extractRows(page);
   await browser.close();
