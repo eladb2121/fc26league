@@ -1,0 +1,13 @@
+package.json
+{
+  "name": "challonge-to-slack-text",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "puppeteer": "^23.7.0",
+    "node-fetch": "^3.3.2"
+  }
+}
