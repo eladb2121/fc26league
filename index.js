@@ -10,80 +10,40 @@ if (!SLACK_WEBHOOK) {
   process.exit(1);
 }
 
-// pad helper
 function pad(str, width) {
   str = String(str ?? "");
   return str.length >= width ? str.slice(0, width - 1) + "…" : str.padEnd(width, " ");
 }
 
-// ------------ Main Wins/Losses parser ------------
+// original simple formatter, shows Name, Pts, W, L
 function makeBlock(rows) {
-  const header = rows[0].map(s => (s || "").toLowerCase().trim());
+  const header = rows[0].map(s => (s || "").toLowerCase());
+  const idx = {
+    rank:   header.findIndex(h => /rank|pos|#/.test(h)),
+    name:   header.findIndex(h => /name|player|team/.test(h)),
+    wins:   header.findIndex(h => /win|^w$/.test(h)),
+    losses: header.findIndex(h => /loss|^l$/.test(h)),
+    points: header.findIndex(h => /point|pts|score/.test(h))
+  };
+
   const body = rows.slice(1, MAX_ROWS + 1);
 
-  // 1) pick the Name column (explicit or most text-heavy)
-  let idxName = header.findIndex(h => /^(name|player|team)$/.test(h));
-  if (idxName < 0) {
-    let best = -1, bestLen = -1;
-    for (let c = 0; c < header.length; c++) {
-      const len = body.reduce((acc, r) => {
-        const v = (r[c] || "").toString();
-        return acc + (/\D/.test(v) ? v.length : 0);
-      }, 0);
-      if (len > bestLen) { best = c; bestLen = len; }
-    }
-    idxName = best >= 0 ? best : 0;
-  }
-
-  // 2) Try explicit W and L headers
-  let idxWins   = header.findIndex(h => /^(w|win|wins)$/.test(h));
-  let idxLosses = header.findIndex(h => /^(l|loss|losses)$/.test(h));
-
-  // 3) If not found, look for a combined record column like "4-1" or "4 : 1"
-  let idxRecord = -1;
-  if (idxWins < 0 || idxLosses < 0) {
-    const looksLikeRecord = v => /^\s*\d+\s*[-:]\s*\d+\s*$/.test(String(v || ""));
-    for (let c = 0; c < header.length; c++) {
-      if (c === idxName) continue;
-      const hitRate = body.reduce((n, r) => n + (looksLikeRecord(r[c]) ? 1 : 0), 0) / body.length;
-      if (hitRate > 0.6) { idxRecord = c; break; } // majority of rows look like W-L
-    }
-  }
-
-  // 4) Parse each row
-  const parsed = body.map(r => {
-    const name = (r[idxName] ?? "").toString().trim();
-    let w = null, l = null;
-
-    if (idxRecord >= 0) {
-      const m = String(r[idxRecord] || "").match(/(\d+)\s*[-:]\s*(\d+)/);
-      if (m) { w = parseInt(m[1], 10); l = parseInt(m[2], 10); }
-    } else {
-      if (idxWins >= 0)   w = parseInt(String(r[idxWins]   || "").trim(), 10);
-      if (idxLosses >= 0) l = parseInt(String(r[idxLosses] || "").trim(), 10);
-    }
-
-    if (!Number.isFinite(w)) w = 0;
-    if (!Number.isFinite(l)) l = 0;
-
-    return { name, w, l };
-  });
-
-  // 5) Sort by wins desc, then losses asc, then name
-  parsed.sort((a, b) => b.w - a.w || a.l - b.l || a.name.localeCompare(b.name));
-
-  // 6) Render Slack block
   const lines = [];
-  lines.push("```Name                      W   L");
-  for (const row of parsed) {
-    lines.push(`${row.name.padEnd(24)}  ${String(row.w).padStart(2," ")}  ${String(row.l).padStart(2," ")}`);
+  lines.push("```#  Name                      Pts   W   L");
+  for (let i = 0; i < body.length; i++) {
+    const r = body[i];
+    const name = idx.name >= 0 ? r[idx.name] : r[1] || "";
+    const pts  = idx.points >= 0 ? r[idx.points] : "";
+    const w    = idx.wins >= 0 ? r[idx.wins] : "";
+    const l    = idx.losses >= 0 ? r[idx.losses] : "";
+    const rankText = idx.rank >= 0 ? String(r[idx.rank]) : String(i + 1);
+    lines.push(`${rankText.toString().padStart(2," ")}  ${pad(name, 24)}  ${String(pts||"").padStart(3," ")}  ${String(w||"").padStart(2," ")}  ${String(l||"").padStart(2," ")}`);
   }
   lines.push("```");
   return lines.join("\n");
 }
-// -------------------------------------------------
 
-// recursive table extraction from frames
+// search tables in all frames
 async function extractRowsFromFrame(frame) {
   const rows = await frame.evaluate(() => {
     function tableToRows(table) {
@@ -121,8 +81,9 @@ async function extractRowsFromFrame(frame) {
       const fakeHeader = Array(width).fill("");
       if (width >= 1) fakeHeader[0] = "Rank";
       if (width >= 2) fakeHeader[1] = "Name";
-      if (width >= 3) fakeHeader[2] = "W";
-      if (width >= 4) fakeHeader[3] = "L";
+      if (width >= 3) fakeHeader[2] = "Pts";
+      if (width >= 4) fakeHeader[3] = "W";
+      if (width >= 5) fakeHeader[4] = "L";
       rows.unshift(fakeHeader);
     }
     return rows;
@@ -157,10 +118,8 @@ async function run() {
 
   await browser.close();
 
-  console.log("Rows found:", rows.length);
   if (!rows || rows.length < 2) {
     const fallbackText = `Challonge leaderboard\n${CHALLONGE_URL}\nNo table found.`;
-    console.log("No table found, sending fallback.");
     await fetch(SLACK_WEBHOOK, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -173,23 +132,19 @@ async function run() {
   const title = "*Daily Challonge leaderboard*";
   const payload = { text: `${title}\n${block}\n${CHALLONGE_URL}` };
 
-  console.log("Posting to Slack...");
   const res = await fetch(SLACK_WEBHOOK, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload)
   });
 
-  const text = await res.text();
-  console.log("Slack response:", res.status, text);
-
   if (!res.ok) {
-    console.error("Slack webhook failed");
+    console.error("Slack webhook failed", await res.text());
     process.exit(1);
   }
 }
 
 run().catch(err => {
-  console.error("Error:", err);
+  console.error(err);
   process.exit(1);
 });
