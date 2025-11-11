@@ -10,51 +10,52 @@ if (!SLACK_WEBHOOK) {
   process.exit(1);
 }
 
-function pad(str, width) {
-  str = String(str ?? "");
-  return str.length >= width ? str.slice(0, width - 1) + "…" : str.padEnd(width, " ");
-}
-
+// only Wins and Losses
 function makeBlock(rows) {
-  const header = rows[0].map(s => s.toLowerCase());
-  const idx = {
-    name: header.findIndex(h => /name|player|team/.test(h)),
-    wins: header.findIndex(h => /win|w\b/.test(h)),
-    losses: header.findIndex(h => /loss|l\b/.test(h))
-  };
-
+  const header = rows[0].map(s => (s || "").toLowerCase());
   const body = rows.slice(1, MAX_ROWS + 1);
+
+  // try to find columns by header text
+  let idxName   = header.findIndex(h => /name|player|team/.test(h));
+  let idxWins   = header.findIndex(h => /\bwin(s)?\b|^w$/.test(h));
+  let idxLosses = header.findIndex(h => /\bloss(es)?\b|^l$/.test(h));
+
+  // fallbacks
+  const cols = header.length;
+  if (idxName < 0) {
+    let best = -1, bestLen = -1;
+    for (let c = 0; c < cols; c++) {
+      const len = body.reduce((acc, r) => {
+        const v = (r[c] || "").toString().trim();
+        return acc + (/\D/.test(v) ? v.length : 0);
+      }, 0);
+      if (len > bestLen) { best = c; bestLen = len; }
+    }
+    idxName = best >= 0 ? best : 0;
+  }
+  if (idxWins < 0 || idxLosses < 0) {
+    const numericScore = col => body.reduce((s, r) => s + (/^\d+$/.test((r[col] || "").toString().trim()) ? 1 : 0), 0);
+    const scores = Array.from({ length: cols }, (_, c) => ({ c, s: numericScore(c) }))
+      .sort((a, b) => b.s - a.s)
+      .map(o => o.c)
+      .filter(c => c !== idxName);
+    if (idxWins < 0 && scores[0] != null) idxWins = scores[0];
+    if (idxLosses < 0 && scores[1] != null) idxLosses = scores[1];
+  }
+
   const lines = [];
   lines.push("```Name                      W   L");
   for (const r of body) {
-    const name = idx.name >= 0 ? r[idx.name] : r[1] || "";
-    const w = idx.wins >= 0 ? r[idx.wins] : "";
-    const l = idx.losses >= 0 ? r[idx.losses] : "";
-    lines.push(`${name.padEnd(24)}  ${String(w || "").padStart(2," ")}  ${String(l || "").padStart(2," ")}`);
+    const name = (r[idxName] ?? "").toString();
+    const w = (r[idxWins] ?? "").toString();
+    const l = (r[idxLosses] ?? "").toString();
+    lines.push(`${name.padEnd(24)}  ${w.padStart(2," ")}  ${l.padStart(2," ")}`);
   }
   lines.push("```");
   return lines.join("\n");
 }
 
-  };
-
-  const body = rows.slice(1, MAX_ROWS + 1);
-  const lines = [];
-  lines.push("```#  Name                      Pts   W   L");
-  for (const r of body) {
-    const rank = idx.rank >= 0 ? r[idx.rank] : "";
-    const name = idx.name >= 0 ? r[idx.name] : r[1] || "";
-    const pts  = idx.points >= 0 ? r[idx.points] : "";
-    const w    = idx.wins >= 0 ? r[idx.wins] : "";
-    const l    = idx.losses >= 0 ? r[idx.losses] : "";
-    const rank2 = String(rank || lines.length).padStart(2, " ");
-    lines.push(`${rank2}  ${pad(name, 24)}  ${String(pts || "").padStart(3," ")}  ${String(w || "").padStart(2," ")}  ${String(l || "").padStart(2," ")}`);
-  }
-  lines.push("```");
-  return lines.join("\n");
-}
-
-// helper: searches recursively in all frames
+// search recursively in all frames for a table
 async function extractRowsFromFrame(frame) {
   const rows = await frame.evaluate(() => {
     function tableToRows(table) {
@@ -116,7 +117,7 @@ async function run() {
   });
   const page = await browser.newPage();
 
-  await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36");
+  await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit(537.36) Chrome/124 Safari/537.36");
   await page.setViewport({ width: 1280, height: 900, deviceScaleFactor: 2 });
   await page.goto(CHALLONGE_URL, { waitUntil: "networkidle2", timeout: 60000 });
 
